@@ -15,7 +15,7 @@ export interface QualityParameter {
 }
 export interface AgeColorReference { detected_color: string; estimated_age: string; status?: string | null; color_hex?: string | null; }
 export interface Attachment { role: string; content_type: string; size_bytes: number; verified: boolean; sha256: string; url: string; }
-export interface ScanDetail extends ScanListItem {
+export interface ScanDetail extends Omit<ScanListItem, 'attachments'> {
   department?: { id: number; code: string; name: string; location: string | null } | null;
   device?: { device_id: string; friendly_name?: string | null; model?: string | null; firmware_version?: string | null };
   analysis: Record<string, unknown>;

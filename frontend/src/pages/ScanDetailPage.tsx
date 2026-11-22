@@ -89,7 +89,7 @@ export default function ScanDetailPage() {
     </section>
 
     <section className="panel">
-      <div className="section-heading"><div><span className="eyebrow">BIOCHEMICAL RICE AGE</span><h2>Age & milling freshness evaluation</h2><p>Only values supplied by the device are displayed.</p></div><span className="soft-count">{age?.validation_status || 'Age unavailable'}</span></div>
+      <div className="section-heading"><div><span className="eyebrow">GRAIN AGE</span><h2>Age & milling freshness evaluation</h2><p>Only values supplied by the device are displayed.</p></div><span className="soft-count">{age?.validation_status || 'Age unavailable'}</span></div>
       {age ? <>
         <div className="detail-fact-grid age-fact-grid">
           <Fact label="Age breakdown" value={display(age.age_breakdown || age.category || age.value)}/>

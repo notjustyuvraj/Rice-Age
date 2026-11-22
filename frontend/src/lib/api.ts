@@ -1,40 +1,29 @@
 import type { DashboardSummary, PaginatedScans, ScanDetail, User } from './types';
+import { filterScans, mockAsset, mockScan, mockSummary, mockUser } from './mockData';
 
-const API = '/api/v1';
-export const getToken = () => sessionStorage.getItem('rice_age_token');
-export const setToken = (token: string | null) => token ? sessionStorage.setItem('rice_age_token', token) : sessionStorage.removeItem('rice_age_token');
+const TOKEN_KEY = 'grain_analyzer_token';
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getToken();
-  const headers = new Headers(init.headers);
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
-  const response = await fetch(`${API}${path}`, { ...init, headers });
-  if (response.status === 401) {
-    setToken(null);
-    window.dispatchEvent(new Event('rice-age:unauthorized'));
-  }
-  if (!response.ok) {
-    let message = `Request failed (${response.status})`;
-    try { const data = await response.json(); message = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail ?? data); } catch { /* keep fallback */ }
-    throw new Error(message);
-  }
-  return response.json() as Promise<T>;
-}
+export const getToken = () => sessionStorage.getItem(TOKEN_KEY);
+export const setToken = (token: string | null) => token ? sessionStorage.setItem(TOKEN_KEY, token) : sessionStorage.removeItem(TOKEN_KEY);
 
 export const api = {
-  login: (email: string, password: string) => request<{access_token: string; token_type: string; expires_in: number}>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
-  me: () => request<User>('/auth/me'),
-  summary: (departmentId?: number) => request<DashboardSummary>(`/dashboard/summary${departmentId ? `?department_id=${departmentId}` : ''}`),
-  latest: (departmentId?: number) => request<{item: ScanDetail | null; message?: string}>(`/scans/latest${departmentId ? `?department_id=${departmentId}` : ''}`),
-  scans: (params: URLSearchParams) => request<PaginatedScans>(`/scans?${params.toString()}`),
-  scan: (id: number) => request<ScanDetail>(`/scans/${id}`),
-  departments: () => request<Array<{id:number;code:string;name:string;location:string|null;is_active:boolean}>>('/admin/departments'),
-  asset: async (path: string) => {
-    const token = getToken();
-    const response = await fetch(path, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-    if (response.status === 401) { setToken(null); window.dispatchEvent(new Event('rice-age:unauthorized')); }
-    if (!response.ok) throw new Error(`Unable to load attachment (${response.status})`);
-    return URL.createObjectURL(await response.blob());
+  login: async (email: string, password: string) => {
+    if (!email.trim() || !password.trim()) throw new Error('Enter an email address and password.');
+    sessionStorage.setItem('grain_analyzer_email', email.trim());
+    return { access_token: 'mock-session', token_type: 'bearer', expires_in: 60 * 60 * 8 };
   },
+  me: async (): Promise<User> => {
+    if (!getToken()) throw new Error('Not signed in');
+    return { ...mockUser, email: sessionStorage.getItem('grain_analyzer_email') || mockUser.email };
+  },
+  summary: async (): Promise<DashboardSummary> => mockSummary(),
+  latest: async () => ({ item: mockSummary().latest_scan }),
+  scans: async (params: URLSearchParams): Promise<PaginatedScans> => filterScans(params),
+  scan: async (id: number): Promise<ScanDetail> => {
+    const scan = mockScan(id);
+    if (!scan) throw new Error('Scan not found');
+    return scan;
+  },
+  departments: async () => mockSummary().departments.map(department => ({ ...department, location: null })),
+  asset: async (path: string) => URL.createObjectURL(mockAsset(path)),
 };

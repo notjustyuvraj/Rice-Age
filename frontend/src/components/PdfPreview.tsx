@@ -33,7 +33,7 @@ export default function PdfPreview({ scanId, onClose }: { scanId: number; onClos
     if (!src) return;
     const anchor = document.createElement('a');
     anchor.href = src;
-    anchor.download = `rice-age-scan-${scanId}.pdf`;
+    anchor.download = `grain-analyzer-scan-${scanId}.pdf`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -59,7 +59,7 @@ export default function PdfPreview({ scanId, onClose }: { scanId: number; onClos
   return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="pdf-modal" role="dialog" aria-modal="true" aria-label="Original device report">
       <header className="pdf-modal-head">
-        <div className="flex items-center gap-3"><span className="icon-tile"><FileText size={18}/></span><div><p className="font-semibold text-ink">Original device report</p><p className="text-xs text-muted">Scan #{scanId} · Uploaded PDF · Original bytes preserved</p></div></div>
+        <div className="flex items-center gap-3"><span className="icon-tile"><FileText size={18}/></span><div><p className="font-normal text-ink">Original device report</p><p className="text-xs text-muted">Scan #{scanId} · Uploaded PDF · Original bytes preserved</p></div></div>
         <div className="pdf-actions">
           <button className="btn btn-secondary btn-small" onClick={openInTab} disabled={!src}><ExternalLink size={14}/> Open</button>
           <button className="btn btn-secondary btn-small" onClick={print} disabled={!src}><Printer size={14}/> Print</button>

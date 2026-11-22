@@ -8,7 +8,7 @@ import ScanDetailPage from './pages/ScanDetailPage';
 
 function ProtectedLayout() {
   const { user, loading } = useAuth();
-  if (loading) return <div className="app-loading"><div className="loading-orb"/><span>Loading Rice Age…</span></div>;
+  if (loading) return <div className="app-loading"><div className="loading-orb"/><span>Loading Grain Analyzer…</span></div>;
   if (!user) return <Navigate to="/login" replace/>;
   return <AppLayout/>;
 }
