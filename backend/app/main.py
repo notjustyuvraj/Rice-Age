@@ -11,7 +11,7 @@ async def lifespan(app: FastAPI):
     # Schema changes are managed by Alembic. No implicit create_all in runtime.
     yield
 
-app = FastAPI(title=settings.app_name, version="0.1.0", description="Rice Age IoT ingestion and administration API (P1/P2 only)", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.2.0", description="Rice Age departmental IoT quality portal API (P1/P2 foundation and P3 dashboard read APIs)", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Authorization", "Content-Type"])
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
@@ -20,4 +20,4 @@ app.include_router(scans.router, prefix="/api/v1")
 
 @app.get("/health", tags=["Health"])
 def health():
-    return {"status": "ok", "service": settings.app_name, "scope": "P1/P2"}
+    return {"status": "ok", "service": settings.app_name, "scope": "P1/P2/P3"}

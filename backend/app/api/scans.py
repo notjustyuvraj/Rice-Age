@@ -1,8 +1,9 @@
 import hashlib, json, re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.api.deps import current_device, current_user
@@ -181,16 +182,184 @@ def device_scan_status(scan_id: int, db: Session = Depends(get_db), device: Devi
     roles = [a.role for a in db.query(ScanAttachment).filter(ScanAttachment.scan_id == scan.id, ScanAttachment.verified.is_(True)).all()]
     return {"scan_id": scan.id, "client_scan_id": scan.client_scan_id, "processing_status": scan.processing_status, "attachments_verified": roles, "missing_attachments": sorted(REQUIRED_ROLES - set(roles))}
 
-# Minimal protected metadata/file endpoints exist to verify the P2 authorization boundary.
-# They are APIs only; no reports UI, history UI or dashboard is included in this milestone.
+# Department-facing read APIs for P3. All routes scope data on the server.
+from fastapi import Query
+from app.models import Department, Device
+
+
+def _scan_scope(query, user: User, department_id: int | None = None):
+    if user.role == "SUPER_ADMIN":
+        if department_id is not None:
+            query = query.filter(Scan.department_id == department_id)
+    else:
+        # Ignore client-supplied department IDs for non-super-admin users.
+        query = query.filter(Scan.department_id == user.department_id)
+    return query
+
+
+def _scan_list_item(scan: Scan, db: Session) -> dict:
+    department = db.get(Department, scan.department_id)
+    attachments = db.query(ScanAttachment).filter(ScanAttachment.scan_id == scan.id).all()
+    analysis = (scan.raw_payload or {}).get("analysis") or {}
+    age = (scan.raw_payload or {}).get("rice_age")
+    return {
+        "id": scan.id,
+        "client_scan_id": scan.client_scan_id,
+        "sample_id": scan.sample_id,
+        "batch_id": scan.batch_id,
+        "lot_id": scan.lot_id,
+        "device_id": scan.device_id,
+        "department_id": scan.department_id,
+        "department_name": department.name if department else None,
+        "processing_status": scan.processing_status,
+        "quality_verdict": scan.quality_verdict,
+        "analyzed_at": scan.analyzed_at.isoformat(),
+        "completed_at": scan.completed_at.isoformat() if scan.completed_at else None,
+        "grain_count": analysis.get("grain_count"),
+        "avg_length_mm": analysis.get("avg_length_mm"),
+        "avg_breadth_mm": analysis.get("avg_breadth_mm"),
+        "rice_age": age,
+        "report_available": any(a.role == "REPORT_PDF" and a.verified for a in attachments),
+        "attachments": [a.role for a in attachments if a.verified],
+    }
+
+
+def _scan_detail(scan: Scan, db: Session) -> dict:
+    department = db.get(Department, scan.department_id)
+    device = db.query(Device).filter(Device.id == scan.device_db_id).first()
+    attachments = db.query(ScanAttachment).filter(ScanAttachment.scan_id == scan.id).all()
+    measurements = db.query(Measurement).filter(Measurement.scan_id == scan.id).order_by(Measurement.id).all()
+    evaluations = db.query(QualityEvaluation).filter(QualityEvaluation.scan_id == scan.id).order_by(QualityEvaluation.id).all()
+    age = db.query(AgeResult).filter(AgeResult.scan_id == scan.id).first()
+    return {
+        **_scan_list_item(scan, db),
+        "department": ({"id": department.id, "code": department.code, "name": department.name, "location": department.location} if department else None),
+        "device": ({"device_id": device.device_id, "friendly_name": device.friendly_name, "model": device.model, "firmware_version": device.firmware_version} if device else {"device_id": scan.device_id}),
+        "analysis": (scan.raw_payload or {}).get("analysis") or {},
+        "evaluation": (scan.raw_payload or {}).get("evaluation") or {},
+        "rice_age_result": ({
+            **(age.raw_result or {}),
+            "value": age.age_value, "unit": age.unit, "category": age.category,
+            "model_version": age.model_version, "confidence": age.confidence,
+            "validation_status": age.validation_status,
+        } if age else None),
+        "quality_parameters": [
+            {
+                "code": e.parameter_code, "name": e.parameter_name,
+                "permissible_limit": e.permissible_limit,
+                "mass_percent": e.mass_percent, "count_percent": e.count_percent,
+                "kernel_count": e.kernel_count, "estimated_mass_g": e.estimated_mass_g,
+                "status": e.status,
+            } for e in evaluations
+        ],
+        "measurements": [
+            {"metric_code": m.metric_code, "value": m.value, "unit": m.unit,
+             "basis": m.basis, "measured_vs_estimated": m.measured_vs_estimated,
+             "source_path": m.source_path}
+            for m in measurements
+        ],
+        "attachments": [
+            {"role": a.role, "content_type": a.content_type, "size_bytes": a.size_bytes,
+             "verified": a.verified, "sha256": a.sha256,
+             "url": f"/api/v1/scans/{scan.id}/files/{a.role}"}
+            for a in attachments if a.verified
+        ],
+        "advisory_only": ((scan.raw_payload or {}).get("evaluation") or {}).get("certification_status") in ("ADVISORY_ONLY", "PROTOTYPE", "NON_CERTIFIED"),
+    }
+
+
+@router.get("/dashboard/summary")
+def dashboard_summary(
+    department_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    scans = _scan_scope(db.query(Scan), user, department_id)
+    completed = scans.filter(Scan.processing_status == "Completed")
+    total_count = scans.count()
+    completed_count = completed.count()
+    flagged_count = completed.filter(func.upper(Scan.quality_verdict) == "FLAG").count()
+    latest = completed.order_by(Scan.analyzed_at.desc(), Scan.id.desc()).first()
+    department = db.get(Department, user.department_id) if user.role != "SUPER_ADMIN" and user.department_id else None
+    if user.role == "SUPER_ADMIN":
+        departments = db.query(Department).order_by(Department.name).all()
+        department_rows = [
+            {"id": d.id, "code": d.code, "name": d.name, "is_active": d.is_active,
+             "device_count": db.query(Device).filter(Device.assigned_department_id == d.id).count(),
+             "completed_scans": db.query(Scan).filter(Scan.department_id == d.id, Scan.processing_status == "Completed").count()}
+            for d in departments
+        ]
+        device_query = db.query(Device)
+        if department_id is not None:
+            device_query = device_query.filter(Device.assigned_department_id == department_id)
+        device_count = device_query.count()
+    else:
+        department_rows = []
+        device_count = db.query(Device).filter(Device.assigned_department_id == user.department_id).count() if user.department_id else 0
+    recent = completed.order_by(Scan.analyzed_at.desc(), Scan.id.desc()).limit(6).all()
+    return {
+        "role": user.role,
+        "department": ({"id": department.id, "code": department.code, "name": department.name, "location": department.location} if department else None),
+        "filters": {"department_id": department_id if user.role == "SUPER_ADMIN" else user.department_id},
+        "counts": {"total_scans": total_count, "completed_scans": completed_count, "flagged_scans": flagged_count, "devices": device_count},
+        "latest_scan": _scan_detail(latest, db) if latest else None,
+        "recent_scans": [_scan_list_item(scan, db) for scan in recent],
+        "departments": department_rows,
+    }
+
+
+@router.get("/scans/latest")
+def latest_scan(
+    department_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    query = _scan_scope(db.query(Scan), user, department_id).filter(Scan.processing_status == "Completed")
+    scan = query.order_by(Scan.analyzed_at.desc(), Scan.id.desc()).first()
+    if not scan:
+        return {"item": None, "message": "No completed scans are available for this department."}
+    return {"item": _scan_detail(scan, db)}
+
+
+@router.get("/scans")
+def list_scans(
+    department_id: int | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    sample_id: str | None = None,
+    batch_id: str | None = None,
+    lot_id: str | None = None,
+    device_id: str | None = None,
+    quality_verdict: str | None = None,
+    processing_status: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    query = _scan_scope(db.query(Scan), user, department_id)
+    if sample_id: query = query.filter(Scan.sample_id.ilike(f"%{sample_id.strip()}%"))
+    if batch_id: query = query.filter(Scan.batch_id.ilike(f"%{batch_id.strip()}%"))
+    if lot_id: query = query.filter(Scan.lot_id.ilike(f"%{lot_id.strip()}%"))
+    if device_id: query = query.filter(Scan.device_id.ilike(f"%{device_id.strip()}%"))
+    if quality_verdict: query = query.filter(func.upper(func.replace(Scan.quality_verdict, " ", "_")) == quality_verdict.upper())
+    if processing_status: query = query.filter(Scan.processing_status == processing_status)
+    if date_from: query = query.filter(Scan.analyzed_at >= datetime.combine(date_from, datetime.min.time()).replace(tzinfo=timezone.utc))
+    if date_to: query = query.filter(Scan.analyzed_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time()).replace(tzinfo=timezone.utc))
+    total = query.count()
+    rows = query.order_by(Scan.analyzed_at.desc(), Scan.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return {"items": [_scan_list_item(scan, db) for scan in rows], "total": total, "page": page,
+            "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+
+
 @router.get("/scans/{scan_id}")
 def protected_scan_metadata(scan_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
     scan = db.get(Scan, scan_id)
     if not scan: raise HTTPException(404, "Scan not found")
-    if user.role != "SUPER_ADMIN" and user.department_id != scan.department_id: raise HTTPException(404, "Scan not found")
-    return {"id": scan.id, "sample_id": scan.sample_id, "batch_id": scan.batch_id, "lot_id": scan.lot_id, "device_id": scan.device_id,
-            "department_id": scan.department_id, "processing_status": scan.processing_status, "quality_verdict": scan.quality_verdict,
-            "analyzed_at": scan.analyzed_at.isoformat(), "attachments": [a.role for a in db.query(ScanAttachment).filter(ScanAttachment.scan_id == scan.id).all()]}
+    if user.role != "SUPER_ADMIN" and user.department_id != scan.department_id:
+        raise HTTPException(404, "Scan not found")
+    return _scan_detail(scan, db)
+
 
 @router.get("/scans/{scan_id}/files/{role}")
 def protected_scan_file(scan_id: int, role: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -198,7 +367,7 @@ def protected_scan_file(scan_id: int, role: str, db: Session = Depends(get_db), 
     if not scan: raise HTTPException(404, "Scan not found")
     if user.role != "SUPER_ADMIN" and user.department_id != scan.department_id: raise HTTPException(404, "File not found")
     attachment = db.query(ScanAttachment).filter(ScanAttachment.scan_id == scan_id, ScanAttachment.role == role.upper()).first()
-    if not attachment: raise HTTPException(404, "File not found")
+    if not attachment or not attachment.verified: raise HTTPException(404, "File not found")
     try: path = resolve_storage_key(attachment.storage_key)
     except FileNotFoundError: raise HTTPException(404, "File not found")
     safe_scan_id = re.sub(r"[^A-Za-z0-9._-]", "_", scan.client_scan_id)[:100]
